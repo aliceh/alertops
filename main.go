@@ -6,7 +6,7 @@ import (
 	pd "github.com/aliceh/alertops/pkg/provider"
 )
 
-var token = "u+ZoxVdhSbar1qxnHyvQ"
+var token = ""
 
 func main() {
 
