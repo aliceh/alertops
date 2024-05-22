@@ -219,3 +219,25 @@ func (c *client) GetHistoricalAlertsForCluster(pdServiceIDs []string) (map[strin
 	return incidentMap, nil
 
 }
+
+func (c *client) GetIncidents(opts pd.ListIncidentsOptions) ([]pd.Incident, error) {
+	var ctx = context.Background()
+	var i []pd.Incident
+
+	for {
+		response, err := c.pdclient.ListIncidentsWithContext(ctx, opts)
+		if err != nil {
+			return i, fmt.Errorf("pd.GetIncidents(): failed to get incidents : %v", err)
+		}
+
+		i = append(i, response.Incidents...)
+
+		opts.Offset += opts.Limit
+
+		if !response.More {
+			break
+		}
+	}
+
+	return i, nil
+}

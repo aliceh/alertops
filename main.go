@@ -1,24 +1,18 @@
 package main
 
 import (
-	"context"
 	"fmt"
 
-	"github.com/PagerDuty/go-pagerduty"
+	pd "github.com/aliceh/alertops/pkg/provider"
 )
 
-var authtoken = "" // Set your auth token here
+var token = "u+ZoxVdhSbar1qxnHyvQ"
 
 func main() {
-	ctx := context.Background()
-	client := pagerduty.NewClient(authtoken)
 
-	var opts pagerduty.ListEscalationPoliciesOptions
-	eps, err := client.ListEscalationPoliciesWithContext(ctx, opts)
-	if err != nil {
-		panic(err)
-	}
-	for _, p := range eps.EscalationPolicies {
-		fmt.Println(p.Name)
-	}
+	client := pd.NewClient().WithOauthToken(token)
+
+	client.GetPDServiceIDs()
+	fmt.Println("Hello world!")
+
 }
