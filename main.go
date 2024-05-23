@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 
+	"github.com/aliceh/alertops/pkg/provider/pagerduty"
+
 	"github.com/spf13/viper"
 )
 
@@ -18,7 +20,14 @@ type Config struct {
 
 func main() {
 
-	LoadConfig(path)
+	config, err := LoadConfig(path)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	pdclient := pagerduty.NewClient(config.pd_user_token)
+	pdclient.ListEscalationPoliciesWithContext()
 
 }
 
@@ -31,7 +40,8 @@ func LoadConfig(path string) (config Config, err error) {
 	if err != nil {
 		fmt.Println(err)
 	}
+	config.pd_user_token = viper.GetString("pd_user_token")
+	config.aws_proxy = viper.GetString("aws_proxy")
 
-	fmt.Println(viper.ConfigFileUsed())
-	return
+	return config, nil
 }
