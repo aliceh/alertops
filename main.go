@@ -3,16 +3,35 @@ package main
 import (
 	"fmt"
 
-	pd "github.com/aliceh/alertops/pkg/provider"
+	"github.com/spf13/viper"
 )
 
-var token = ""
+const (
+	ConfigFileName = "osdctl"
+	path           = "$HOME/.config"
+)
+
+type Config struct {
+	pd_user_token string
+	aws_proxy     string
+}
 
 func main() {
 
-	client := pd.NewClient().WithOauthToken(token)
+	LoadConfig(path)
 
-	client.GetPDServiceIDs()
-	fmt.Println("Hello world!")
+}
 
+func LoadConfig(path string) (config Config, err error) {
+	viper.AddConfigPath(path)
+	viper.SetConfigName("osdctl")
+	viper.SetConfigType("yaml")
+
+	err = viper.ReadInConfig()
+	if err != nil {
+		fmt.Println(err)
+	}
+
+	fmt.Println(viper.ConfigFileUsed())
+	return
 }
