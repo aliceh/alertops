@@ -3,7 +3,7 @@ package main
 import (
 	"fmt"
 
-	"github.com/aliceh/alertops/pkg/provider/pagerduty"
+	pagerduty "github.com/aliceh/alertops/pkg/pagerduty"
 
 	"github.com/spf13/viper"
 )
@@ -26,8 +26,8 @@ func main() {
 		return
 	}
 
-	pdclient := pagerduty.NewClient(config.pd_user_token)
-	pdclient.ListEscalationPoliciesWithContext()
+	pdclient := pagerduty.NewClient().WithOauthToken(config.pd_user_token)
+	pdclient.GetPDServiceIDs()
 
 }
 
