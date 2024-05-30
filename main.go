@@ -12,7 +12,8 @@ import (
 
 const (
 	ConfigFileName = "osdctl"
-	path           = "$HOME/.config"
+	path_osdctl    = "$HOME/.config"
+	path_srepd     = "$HOME/.config/srepd"
 )
 
 type Config struct {
@@ -24,13 +25,13 @@ type Config struct {
 
 func main() {
 
-	config, _ := LoadConfig(path)
+	config_srepd, _ := LoadConfig(path_srepd)
 
 	myconfig := Config{
-		pd_user_token: config.pd_user_token,
-		teams:         []string{"P8ODN2F"},
-		silentUser:    "P8QS6CC",
-		ignoredUsers:  []string{"PWT7CSF"},
+		pd_user_token: config_srepd.pd_user_token,
+		teams:         config_srepd.teams,
+		silentUser:    config_srepd.silentUser,
+		ignoredUsers:  config_srepd.ignoredUsers,
 	}
 	ctx := context.Background()
 
@@ -67,7 +68,7 @@ func main() {
 
 func LoadConfig(path string) (config Config, err error) {
 	viper.AddConfigPath(path)
-	viper.SetConfigName("osdctl")
+	viper.SetConfigName("srepd")
 	viper.SetConfigType("yaml")
 
 	err = viper.ReadInConfig()
@@ -75,7 +76,10 @@ func LoadConfig(path string) (config Config, err error) {
 		fmt.Println(err)
 		return config, err
 	}
-	config.pd_user_token = viper.GetString("pd_user_token")
+	config.pd_user_token = viper.GetString("token")
+	config.teams = viper.GetStringSlice("teams")
+	config.silentUser = viper.GetString("silentuser")
+	config.ignoredUsers = viper.GetStringSlice("ignoredusers")
 
 	return config, nil
 }
