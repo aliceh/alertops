@@ -1,231 +1,181 @@
-package pagerduty
+package pd
 
 import (
 	"context"
 	"fmt"
-	"sort"
-	"strings"
-	"time"
 
-	pd "github.com/PagerDuty/go-pagerduty"
+	"github.com/PagerDuty/go-pagerduty"
 )
 
 const (
-	PagerDutyUserTokenConfigKey  = "pd_user_token"
-	PagerDutyOauthTokenConfigKey = "pd_oauth_token"
-	PagerDutyTeamIDsKey          = "team_ids"
+	defaultPageLimit = 100
+	defaultOffset    = 0
 )
 
-type IncidentOccurrenceTracker struct {
-	IncidentName   string
-	Count          int
-	LastOccurrence string
+var defaultIncidentStatues = []string{"triggered", "acknowledged"}
+
+// PagerDutyClientInterface is an interface that defines the methods used by the pd package and makes it easier to mock
+// calls to PagerDuty in tests
+type PagerDutyClientInterface interface {
+	CreateIncidentNoteWithContext(ctx context.Context, id string, note pagerduty.IncidentNote) (*pagerduty.IncidentNote, error)
+	GetCurrentUserWithContext(ctx context.Context, opts pagerduty.GetCurrentUserOptions) (*pagerduty.User, error)
+	GetIncidentWithContext(ctx context.Context, id string) (*pagerduty.Incident, error)
+	GetTeamWithContext(ctx context.Context, id string) (*pagerduty.Team, error)
+	ListMembersWithContext(ctx context.Context, id string, opts pagerduty.ListTeamMembersOptions) (*pagerduty.ListTeamMembersResponse, error)
+	GetUserWithContext(ctx context.Context, id string, opts pagerduty.GetUserOptions) (*pagerduty.User, error)
+	ListIncidentAlertsWithContext(ctx context.Context, id string, opts pagerduty.ListIncidentAlertsOptions) (*pagerduty.ListAlertsResponse, error)
+	ListIncidentsWithContext(ctx context.Context, opts pagerduty.ListIncidentsOptions) (*pagerduty.ListIncidentsResponse, error)
+	ListIncidentNotesWithContext(ctx context.Context, id string) ([]pagerduty.IncidentNote, error)
+	ManageIncidentsWithContext(ctx context.Context, email string, opts []pagerduty.ManageIncidentsOptions) (*pagerduty.ListIncidentsResponse, error)
 }
 
-type pdClientInterface interface {
-	ListIncidentsWithContext(context.Context, pd.ListIncidentsOptions) (*pd.ListIncidentsResponse, error)
-	ListServicesWithContext(context.Context, pd.ListServiceOptions) (*pd.ListServiceResponse, error)
-	ManageIncidentsWithContext(ctx context.Context, email string, opts []pd.ManageIncidentsOptions) (*pd.ListIncidentsResponse, error)
-	GetCurrentUserWithContext(ctx context.Context, opts pd.GetCurrentUserOptions) (*pd.User, error)
-	CreateIncidentNoteWithContext(ctx context.Context, id string, note pd.IncidentNote) (*pd.IncidentNote, error)
-	GetIncidentWithContext(ctx context.Context, id string) (*pd.Incident, error)
-	GetTeamWithContext(ctx context.Context, id string) (*pd.Team, error)
-	ListMembersWithContext(ctx context.Context, id string, opts pd.ListTeamMembersOptions) (*pd.ListTeamMembersResponse, error)
-	GetUserWithContext(ctx context.Context, id string, opts pd.GetUserOptions) (*pd.User, error)
-	ListIncidentAlertsWithContext(ctx context.Context, id string, opts pd.ListIncidentAlertsOptions) (*pd.ListAlertsResponse, error)
-	ListIncidentNotesWithContext(ctx context.Context, id string) ([]pd.IncidentNote, error)
+// PagerDutyClient implements PagerDutyClientInterface and is used by the pd package to make calls to PagerDuty
+// This allows for mocking calls that would usually use the pagerduty.Client struct
+type PagerDutyClient interface {
+	PagerDutyClientInterface
 }
 
-type client struct {
-	pdclient   pdClientInterface
-	baseDomain string
-	teamIds    []string
-	userToken  string
-	oauthToken string
+// Config is a struct that holds the PagerDuty client used for all the PagerDuty calls, and the config info for
+// teams, silent user, and ignored users
+type Config struct {
+	Client      PagerDutyClient
+	CurrentUser *pagerduty.User
+
+	// List of the users in the Teams
+	TeamsMemberIDs []string
+	Teams          []*pagerduty.Team
+
+	SilentUser   *pagerduty.User
+	IgnoredUsers []*pagerduty.User
 }
 
-func NewClient() *client {
-	return &client{}
-}
+func NewConfig(token string, teams []string, silentUser string, ignoredUsers []string) (*Config, error) {
+	var c Config
+	var err error
 
-func (c *client) WithBaseDomain(baseDomain string) *client {
-	c.baseDomain = baseDomain
-	return c
-}
+	c.Client = newClient(token)
 
-func (c *client) WithTeamIdList(teamIds []string) *client {
-	c.teamIds = teamIds
-	return c
-}
-
-func (c *client) WithUserToken(token string) *client {
-	c.userToken = token
-	return c
-}
-
-func (c *client) WithOauthToken(token string) *client {
-	c.oauthToken = token
-	return c
-}
-
-func (c *client) Init() (*client, error) {
-	err := c.buildClient()
-	return c, err
-}
-
-func (c *client) buildClient() error {
-	// Leave both here to keep some backwards compatibility
-	// I'm not sure what the difference is, but if both are provided let's just
-	// default to using the User Token over the oauth token
-	if c.userToken != "" {
-		c.pdclient = pd.NewClient(c.userToken)
-		return nil
-	}
-
-	if c.oauthToken != "" {
-		c.pdclient = pd.NewOAuthClient(c.oauthToken)
-		return nil
-	}
-
-	return fmt.Errorf("Could not build PagerDuty Client - No configured tokens")
-}
-
-func (c *client) GetPDServiceIDs() ([]string, error) {
-	// TODO : do we need this to be an exposed function or could we do this when we build the client?
-	lsResponse, err := c.pdclient.ListServicesWithContext(context.TODO(), pd.ListServiceOptions{Query: c.baseDomain, TeamIDs: c.teamIds})
+	c.CurrentUser, err = c.Client.GetCurrentUserWithContext(context.Background(), pagerduty.GetCurrentUserOptions{})
 	if err != nil {
-		return []string{}, fmt.Errorf("failed to ListServicesWithContext: %w", err)
+		return &c, fmt.Errorf("pd.NewConfig(): failed to retrieve PagerDuty user: %v", err)
 	}
 
-	var serviceIDS []string
-	for _, service := range lsResponse.Services {
-		serviceIDS = append(serviceIDS, service.ID)
+	c.Teams, err = GetTeams(c.Client, teams)
+	if err != nil {
+		return &c, fmt.Errorf("pd.NewConfig(): failed to get team(s) `%v`: %v", teams, err)
 	}
 
-	return serviceIDS, nil
+	c.TeamsMemberIDs, err = GetTeamMemberIDs(c.Client, c.Teams, pagerduty.ListTeamMembersOptions{Limit: defaultPageLimit, Offset: defaultOffset})
+	if err != nil {
+		return &c, fmt.Errorf("pd.NewConfig(): failed to get users(s) from teams: %v", err)
+	}
+
+	c.SilentUser, err = GetUser(c.Client, silentUser, pagerduty.GetUserOptions{})
+	if err != nil {
+		return &c, fmt.Errorf("pd.NewConfig(): failed to get silent user: %v", err)
+	}
+
+	for _, i := range ignoredUsers {
+		user, err := GetUser(c.Client, i, pagerduty.GetUserOptions{})
+		if err != nil {
+			return &c, fmt.Errorf("pd.NewConfig(): failed to get user for ignore list `%v`: %v", i, err)
+		}
+		c.IgnoredUsers = append(c.IgnoredUsers, user)
+	}
+
+	return &c, nil
 }
 
-func (c *client) GetFiringAlertsForCluster(pdServiceIDs []string) (map[string][]pd.Incident, error) {
-	incidents := map[string][]pd.Incident{}
-
-	var incidentLimit uint = 25
-	var incidentListOffset uint = 0
-	for _, pdServiceID := range pdServiceIDs {
-		for {
-			listIncidentsResponse, err := c.pdclient.ListIncidentsWithContext(
-				context.TODO(),
-				pd.ListIncidentsOptions{
-					ServiceIDs: []string{pdServiceID},
-					Statuses:   []string{"triggered", "acknowledged"},
-					SortBy:     "urgency:DESC",
-					Limit:      incidentLimit,
-					Offset:     incidentListOffset,
-				},
-			)
-			if err != nil {
-				return nil, err
-			}
-
-			incidents[pdServiceID] = append(incidents[pdServiceID], listIncidentsResponse.Incidents...)
-
-			if !listIncidentsResponse.More {
-				break
-			}
-			incidentListOffset += incidentLimit
-		}
-	}
-	return incidents, nil
+func newClient(token string) PagerDutyClient {
+	return pagerduty.NewClient(token)
 }
 
-func (c *client) GetHistoricalAlertsForCluster(pdServiceIDs []string) (map[string][]*IncidentOccurrenceTracker, error) {
-
-	var currentOffset uint
-	var limit uint = 100
-	var incidents []pd.Incident
-	var ctx = context.TODO()
-	incidentMap := map[string][]*IncidentOccurrenceTracker{}
-
-	for _, pdServiceID := range pdServiceIDs {
-		for currentOffset = 0; true; currentOffset += limit {
-			liResponse, err := c.pdclient.ListIncidentsWithContext(
-				ctx,
-				pd.ListIncidentsOptions{
-					ServiceIDs: []string{pdServiceID},
-					Statuses:   []string{"resolved", "triggered", "acknowledged"},
-					Offset:     currentOffset,
-					Limit:      limit,
-					SortBy:     "created_at:desc",
-				},
-			)
-
-			if err != nil {
-				return nil, err
-			}
-
-			if len(liResponse.Incidents) == 0 {
-				break
-			}
-
-			incidents = append(incidents, liResponse.Incidents...)
-		}
-
-		incidentCounter := make(map[string]*IncidentOccurrenceTracker)
-
-		for _, incident := range incidents {
-			title := strings.Split(incident.Title, " ")[0]
-			if _, found := incidentCounter[title]; found {
-				incidentCounter[title].Count++
-
-				// Compare current incident timestamp vs our previous 'latest occurrence', and save the most recent.
-				currentLastOccurrence, err := time.Parse(time.RFC3339, incidentCounter[title].LastOccurrence)
-				if err != nil {
-					fmt.Printf("Failed to parse time %q\n", err)
-					return nil, err
-				}
-
-				incidentCreatedAt, err := time.Parse(time.RFC3339, incident.CreatedAt)
-				if err != nil {
-					fmt.Printf("Failed to parse time %q\n", err)
-					return nil, err
-				}
-
-				// We want to see when the latest occurrence was
-				if incidentCreatedAt.After(currentLastOccurrence) {
-					incidentCounter[title].LastOccurrence = incident.CreatedAt
-				}
-
-			} else {
-				// First time encountering this incident type
-				incidentCounter[title] = &IncidentOccurrenceTracker{
-					IncidentName:   title,
-					Count:          1,
-					LastOccurrence: incident.CreatedAt,
-				}
-			}
-		}
-
-		var incidentSlice []*IncidentOccurrenceTracker = make([]*IncidentOccurrenceTracker, 0, len(incidentCounter))
-		for _, val := range incidentCounter {
-			incidentSlice = append(incidentSlice, val)
-		}
-
-		sort.Slice(incidentSlice, func(i int, j int) bool {
-			return incidentSlice[i].Count < incidentSlice[j].Count
-		})
-		incidentMap[pdServiceID] = append(incidentMap[pdServiceID], incidentSlice...)
-
+func NewListIncidentOptsFromDefaults() pagerduty.ListIncidentsOptions {
+	return pagerduty.ListIncidentsOptions{
+		Limit:    defaultPageLimit,
+		Offset:   defaultOffset,
+		Statuses: defaultIncidentStatues,
 	}
-
-	return incidentMap, nil
 
 }
 
-func (c *client) GetIncidents(opts pd.ListIncidentsOptions) ([]pd.Incident, error) {
+func AcknowledgeIncident(client PagerDutyClient, incidents []*pagerduty.Incident, user *pagerduty.User) ([]pagerduty.Incident, error) {
 	var ctx = context.Background()
-	var i []pd.Incident
+	var i []pagerduty.Incident
+
+	opts := []pagerduty.ManageIncidentsOptions{}
+
+	for _, incident := range incidents {
+		opts = append(opts, pagerduty.ManageIncidentsOptions{
+			ID:     incident.ID,
+			Status: "acknowledged",
+			Assignments: []pagerduty.Assignee{{
+				Assignee: user.APIObject,
+			}},
+		})
+	}
 
 	for {
-		response, err := c.pdclient.ListIncidentsWithContext(ctx, opts)
+		response, err := client.ManageIncidentsWithContext(ctx, user.Email, opts)
+		if err != nil {
+			return i, fmt.Errorf("pd.AcknowledgeIncident(): failed to acknowledge incident(s) `%v`: %v", incidents, err)
+		}
+
+		i = append(i, response.Incidents...)
+
+		if response.More {
+			panic("pd.AcknowledgeIncident(): PagerDuty response indicated more data available")
+		}
+
+		if !response.More {
+			break
+		}
+
+	}
+
+	return i, nil
+}
+
+func GetAlerts(client PagerDutyClient, id string, opts pagerduty.ListIncidentAlertsOptions) ([]pagerduty.IncidentAlert, error) {
+	var ctx = context.Background()
+	var a []pagerduty.IncidentAlert
+
+	for {
+		response, err := client.ListIncidentAlertsWithContext(ctx, id, opts)
+		if err != nil {
+			return a, fmt.Errorf("pd.GetAlerts(): failed to get alerts for incident `%v`: %v", id, err)
+		}
+
+		a = append(a, response.Alerts...)
+
+		opts.Offset += opts.Limit
+
+		if !response.More {
+			break
+		}
+	}
+
+	return a, nil
+}
+
+func GetIncident(client PagerDutyClient, id string) (*pagerduty.Incident, error) {
+	var ctx = context.Background()
+	var i *pagerduty.Incident
+
+	i, err := client.GetIncidentWithContext(ctx, id)
+	if err != nil {
+		return i, fmt.Errorf("pd.GetIncident(): failed to get incident `%v`: %v", id, err)
+	}
+
+	return i, nil
+}
+
+func GetIncidents(client PagerDutyClient, opts pagerduty.ListIncidentsOptions) ([]pagerduty.Incident, error) {
+	var ctx = context.Background()
+	var i []pagerduty.Incident
+
+	for {
+		response, err := client.ListIncidentsWithContext(ctx, opts)
 		if err != nil {
 			return i, fmt.Errorf("pd.GetIncidents(): failed to get incidents : %v", err)
 		}
@@ -240,4 +190,132 @@ func (c *client) GetIncidents(opts pd.ListIncidentsOptions) ([]pd.Incident, erro
 	}
 
 	return i, nil
+}
+
+func GetNotes(client PagerDutyClient, id string) ([]pagerduty.IncidentNote, error) {
+	var ctx = context.Background()
+	var n []pagerduty.IncidentNote
+
+	n, err := client.ListIncidentNotesWithContext(ctx, id)
+	if err != nil {
+		return n, fmt.Errorf("pd.GetNotes(): failed to get incident notes `%v`: %v", id, err)
+	}
+
+	return n, nil
+}
+
+func GetTeams(client PagerDutyClient, teams []string) ([]*pagerduty.Team, error) {
+	var ctx = context.Background()
+	var t []*pagerduty.Team
+
+	for _, i := range teams {
+		team, err := client.GetTeamWithContext(ctx, i)
+		if err != nil {
+			return t, fmt.Errorf("pd.GetTeams(): failed to find PagerDuty team `%v`: %v", i, err)
+		}
+		t = append(t, team)
+	}
+
+	return t, nil
+}
+
+func GetTeamMemberIDs(client PagerDutyClient, teams []*pagerduty.Team, opts pagerduty.ListTeamMembersOptions) ([]string, error) {
+	var ctx = context.Background()
+	var u []string
+
+	for _, team := range teams {
+		for {
+			response, err := client.ListMembersWithContext(ctx, team.ID, opts)
+			if err != nil {
+				return u, fmt.Errorf("pd.GetUsers(): failed to retrieve users for PagerDuty team `%v`: %v", team.ID, err)
+			}
+
+			for _, member := range response.Members {
+				u = append(u, member.User.ID)
+			}
+
+			opts.Offset += opts.Limit
+
+			if !response.More {
+				break
+			}
+		}
+	}
+
+	return u, nil
+}
+
+func GetUser(client PagerDutyClient, id string, opts pagerduty.GetUserOptions) (*pagerduty.User, error) {
+	var ctx = context.Background()
+	var u *pagerduty.User
+
+	u, err := client.GetUserWithContext(ctx, id, opts)
+	if err != nil {
+		return u, fmt.Errorf("pd.GetUser(): failed to find PagerDuty user `%v`: %v", id, err)
+	}
+
+	return u, nil
+}
+
+func ReassignIncidents(client PagerDutyClient, incidents []*pagerduty.Incident, user *pagerduty.User, users []*pagerduty.User) ([]pagerduty.Incident, error) {
+	var ctx = context.Background()
+	var i []pagerduty.Incident
+
+	a := []pagerduty.Assignee{}
+	for _, user := range users {
+		a = append(a, pagerduty.Assignee{Assignee: user.APIObject})
+	}
+
+	opts := []pagerduty.ManageIncidentsOptions{}
+
+	for _, incident := range incidents {
+		if incident == nil {
+			return i, fmt.Errorf("pd.ReassignIncidents(): incident is nil")
+		}
+		opts = append(opts, pagerduty.ManageIncidentsOptions{
+			ID:          incident.ID,
+			Assignments: a,
+		})
+	}
+
+	// This loop is likely unnecessary, as the "More" response is probably not used by PagerDuty here
+	// but I'm including it in case we need to use it in the future, and raising a panic if we receive
+	// a "More" response so we can fix the code
+
+	for {
+		response, err := client.ManageIncidentsWithContext(ctx, user.Email, opts)
+		if err != nil {
+			return i, err
+		}
+
+		if response.More {
+			// If we ever do get a "More" response, we we need to handle it, so panic to call attention to the problem
+			panic("pd.ReassignIncidents(): PagerDuty response indicated more data available")
+		}
+
+		i = append(i, response.Incidents...)
+
+		if !response.More {
+			break
+		}
+	}
+
+	return i, nil
+}
+
+func PostNote(client PagerDutyClient, id string, user *pagerduty.User, content string) (*pagerduty.IncidentNote, error) {
+	var ctx = context.Background()
+	var n *pagerduty.IncidentNote
+
+	note := pagerduty.IncidentNote{
+		Content: content,
+		User:    user.APIObject,
+	}
+
+	n, err := client.CreateIncidentNoteWithContext(ctx, id, note)
+	if err != nil {
+		return n, err
+	}
+
+	return n, nil
 }
