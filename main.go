@@ -27,10 +27,10 @@ func main() {
 	}
 	users := utils.DifferenceOfSlices(c.TeamsMemberIDs, config.IgnoredUsers)
 	currentUser, _ := c.Client.GetUserWithContext(ctx, c.CurrentUser.ID, pagerduty.GetUserOptions{})
+	fmt.Printf("%v\n", currentUser.Name)
 
-	fmt.Printf("%v", currentUser.Name)
+	highAcknowledgedIncidents, err := c.Client.ListIncidentsWithContext(ctx, pagerduty.ListIncidentsOptions{UserIDs: users, Urgencies: []string{"high"}, Statuses: []string{"acknowledged"}})
 
-	highAcknowledgedIncidents, err := c.Client.ListIncidentsWithContext(ctx, pagerduty.ListIncidentsOptions{UserIDs: users, Statuses: []string{"acknowledged"}, Urgencies: []string{"high"}})
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -38,8 +38,14 @@ func main() {
 		for _, inc := range highAcknowledgedIncidents.Incidents {
 			ack := inc.Acknowledgements
 			id := inc.ID
+			description := inc.Description
+			cluster := inc.HTMLURL
+			service := inc.Service
 			fmt.Printf("%v\n", ack)
 			fmt.Printf("%v\n", id)
+			fmt.Printf("%v\n", description)
+			fmt.Printf("%v\n", cluster)
+			fmt.Printf("%v\n", service)
 		}
 
 	}

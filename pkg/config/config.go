@@ -10,6 +10,7 @@ const (
 	ConfigFileName = "srepd"
 	ConfigFileType = "yaml"
 	Path           = "$HOME/.config/srepd"
+	PathOsdctl     = "$HOME/.config/"
 )
 
 type Config struct {
@@ -17,6 +18,8 @@ type Config struct {
 	Teams        []string
 	SilentUser   string
 	IgnoredUsers []string
+	ApiKey       string `json:"api_key,omitempty"`
+	AccessToken  string `json:"gh_token,omitempty"`
 }
 
 func LoadConfig(path string) (config Config, err error) {
