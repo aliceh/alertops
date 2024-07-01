@@ -25,31 +25,22 @@ func main() {
 		fmt.Println(err)
 		return
 	}
-	users := utils.DifferenceOfSlices(c.TeamsMemberIDs, config.IgnoredUsers)
+	Users := utils.DifferenceOfSlices(c.TeamsMemberIDs, config.IgnoredUsers)
 	currentUser, _ := c.Client.GetUserWithContext(ctx, c.CurrentUser.ID, pagerduty.GetUserOptions{})
 	fmt.Printf("%v\n", currentUser.Name)
 
-	highAcknowledgedIncidents, err := c.Client.ListIncidentsWithContext(ctx, pagerduty.ListIncidentsOptions{UserIDs: users, Urgencies: []string{"high"}, Statuses: []string{"acknowledged"}})
-
-	if err != nil {
-		fmt.Println(err)
-		return
-	} else {
-		for _, inc := range highAcknowledgedIncidents.Incidents {
-			ack := inc.Acknowledgements
-			id := inc.ID
-			description := inc.Description
-			cluster := inc.HTMLURL
-			service := inc.Service
-			fmt.Printf("%v\n", ack)
-			fmt.Printf("%v\n", id)
-			fmt.Printf("%v\n", description)
-			fmt.Printf("%v\n", cluster)
-			fmt.Printf("%v\n", service)
-		}
-
+	fmt.Printf("Testing GetAlerts command\n")
+	highAcknowledgedIncidents, _ := pd.HighAcknowledgedIncidents(c.Client, Users)
+	for _, inc := range highAcknowledgedIncidents.Incidents {
+		id := inc.ID
+		alerts, _ := pd.GetAlerts(c.Client, id, pagerduty.ListIncidentAlertsOptions{})
+		fmt.Printf("\n,%v ,\n", alerts)
 	}
+	fmt.Printf("\n")
+	fmt.Printf("END Testing GetAlerts command\n")
 
+	a, err := pd.GetIncidents(c.Client, pagerduty.ListIncidentsOptions{})
+	fmt.Printf("GetIncidents Output:  %v\n %v\n", a, err)
 	// triggered_incidents, err := c.Client.GetCurrentUserWithContext(ctx, pagerduty.GetCurrentUserOptions{})
 	// if err != nil {
 	// 	fmt.Println(err)

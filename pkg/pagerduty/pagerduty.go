@@ -99,6 +99,34 @@ func NewListIncidentOptsFromDefaults() pagerduty.ListIncidentsOptions {
 
 }
 
+func HighAcknowledgedIncidents(client PagerDutyClient, users []string) (*pagerduty.ListIncidentsResponse, error) {
+	var ctx = context.Background()
+	highAcknowledgedIncidents, err := client.ListIncidentsWithContext(ctx, pagerduty.ListIncidentsOptions{UserIDs: users, Urgencies: []string{"high"}, Statuses: []string{"acknowledged"}})
+
+	if err != nil {
+		fmt.Println(err)
+		return nil, err
+	} else {
+		for _, inc := range highAcknowledgedIncidents.Incidents {
+			ack := inc.Acknowledgements
+			id := inc.ID
+			description := inc.Description
+			cluster := inc.HTMLURL
+			service := inc.Service
+			fmt.Printf("\n")
+			fmt.Printf("ACK: %v\n", ack)
+			fmt.Printf("ID: %v\n", id)
+			fmt.Printf("Description: %v\n", description)
+			fmt.Printf("Cluster: %v\n", cluster)
+			fmt.Printf("Service: %v\n", service)
+			fmt.Printf("\n")
+		}
+
+	}
+	return highAcknowledgedIncidents, err
+
+}
+
 func AcknowledgeIncident(client PagerDutyClient, incidents []*pagerduty.Incident, user *pagerduty.User) ([]pagerduty.Incident, error) {
 	var ctx = context.Background()
 	var i []pagerduty.Incident
