@@ -3,14 +3,35 @@ package pd
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/PagerDuty/go-pagerduty"
+	utils "github.com/aliceh/alertops/pkg/utils"
 )
 
 const (
 	defaultPageLimit = 100
 	defaultOffset    = 0
 )
+
+type Alert struct {
+	IncidentID  string
+	AlertID     string
+	ClusterID   string
+	ClusterName string
+	Name        string
+	Console     string
+	Hostname    string
+	IP          string
+	Labels      string
+	LastCheckIn string
+	Severity    string
+	Status      string
+	Sop         string
+	Token       string
+	Tags        string
+	WebURL      string
+}
 
 var defaultIncidentStatues = []string{"triggered", "acknowledged"}
 
@@ -20,6 +41,7 @@ type PagerDutyClientInterface interface {
 	CreateIncidentNoteWithContext(ctx context.Context, id string, note pagerduty.IncidentNote) (*pagerduty.IncidentNote, error)
 	GetCurrentUserWithContext(ctx context.Context, opts pagerduty.GetCurrentUserOptions) (*pagerduty.User, error)
 	GetIncidentWithContext(ctx context.Context, id string) (*pagerduty.Incident, error)
+	GetService(serviceID string, opts *pagerduty.GetServiceOptions) (*pagerduty.Service, error)
 	GetTeamWithContext(ctx context.Context, id string) (*pagerduty.Team, error)
 	ListMembersWithContext(ctx context.Context, id string, opts pagerduty.ListTeamMembersOptions) (*pagerduty.ListTeamMembersResponse, error)
 	GetUserWithContext(ctx context.Context, id string, opts pagerduty.GetUserOptions) (*pagerduty.User, error)
@@ -27,6 +49,79 @@ type PagerDutyClientInterface interface {
 	ListIncidentsWithContext(ctx context.Context, opts pagerduty.ListIncidentsOptions) (*pagerduty.ListIncidentsResponse, error)
 	ListIncidentNotesWithContext(ctx context.Context, id string) ([]pagerduty.IncidentNote, error)
 	ManageIncidentsWithContext(ctx context.Context, email string, opts []pagerduty.ManageIncidentsOptions) (*pagerduty.ListIncidentsResponse, error)
+}
+
+// GetClusterName interacts with the PD service endpoint and returns the cluster name string.
+func GetClusterName(servideID string, c PagerDutyClient) (string, error) {
+	service, err := c.GetService(servideID, &pagerduty.GetServiceOptions{})
+
+	if err != nil {
+		return "", err
+	}
+
+	clusterName := strings.Split(service.Description, " ")[0]
+
+	return clusterName, nil
+}
+
+// ParseAlertData parses a pagerduty alert data into the Alert struct.
+func (a *Alert) ParseAlertData(c PagerDutyClient, alert *pagerduty.IncidentAlert) (err error) {
+	a.IncidentID = alert.Incident.ID
+	a.AlertID = alert.ID
+	a.Name = alert.Summary
+	a.Status = alert.Status
+	a.WebURL = alert.HTMLURL
+
+	// Check if the alert is of type 'Missing cluster'
+	isCHGM := alert.Body["details"].(map[string]interface{})["notes"]
+
+	// Check if the alert is of type 'Certificate is expiring'
+	isCertExpiring := alert.Body["details"].(map[string]interface{})["hostname"]
+
+	if isCHGM != nil {
+		notes := strings.Split(fmt.Sprint(alert.Body["details"].(map[string]interface{})["notes"]), "\n")
+
+		a.ClusterID = strings.Replace(notes[0], "cluster_id: ", "", 1)
+		a.ClusterName = strings.Split(fmt.Sprint(alert.Body["details"].(map[string]interface{})["name"]), ".")[0]
+
+		lastCheckIn := fmt.Sprint(alert.Body["details"].(map[string]interface{})["last healthy check-in"])
+		a.LastCheckIn, err = utils.FormatTimestamp(lastCheckIn)
+
+		if err != nil {
+			return err
+		}
+
+		a.Token = fmt.Sprint(alert.Body["details"].(map[string]interface{})["token"])
+		a.Tags = fmt.Sprint(alert.Body["details"].(map[string]interface{})["tags"])
+		a.Sop = strings.Replace(notes[1], "runbook: ", "", 1)
+
+	} else if isCertExpiring != nil {
+		a.Hostname = fmt.Sprint(alert.Body["details"].(map[string]interface{})["hostname"])
+		a.IP = fmt.Sprint(alert.Body["details"].(map[string]interface{})["ip"])
+		a.Sop = fmt.Sprint(alert.Body["details"].(map[string]interface{})["url"])
+		a.Name = strings.Split(alert.Summary, " on ")[0]
+		a.ClusterName = "N/A"
+
+	} else {
+		a.ClusterID = fmt.Sprint(alert.Body["details"].(map[string]interface{})["cluster_id"])
+		a.ClusterName, err = GetClusterName(alert.Service.ID, c)
+
+		// If the service mapped to the current incident is not available (404)
+		if err != nil {
+			a.ClusterName = "N/A"
+		}
+
+		a.Console = fmt.Sprint(alert.Body["details"].(map[string]interface{})["console"])
+		a.Labels = fmt.Sprint(alert.Body["details"].(map[string]interface{})["firing"])
+		a.Sop = fmt.Sprint(alert.Body["details"].(map[string]interface{})["link"])
+	}
+
+	// If there's no cluster ID related to the given alert
+	if a.ClusterID == "" {
+		a.ClusterID = "N/A"
+	}
+
+	return nil
 }
 
 // PagerDutyClient implements PagerDutyClientInterface and is used by the pd package to make calls to PagerDuty
@@ -38,7 +133,7 @@ type PagerDutyClient interface {
 // Config is a struct that holds the PagerDuty client used for all the PagerDuty calls, and the config info for
 // teams, silent user, and ignored users
 type Config struct {
-	Client      PagerDutyClient
+	Client      *pagerduty.Client
 	CurrentUser *pagerduty.User
 
 	// List of the users in the Teams
@@ -86,7 +181,7 @@ func NewConfig(token string, teams []string, silentUser string, ignoredUsers []s
 	return &c, nil
 }
 
-func newClient(token string) PagerDutyClient {
+func newClient(token string) *pagerduty.Client {
 	return pagerduty.NewClient(token)
 }
 
@@ -100,8 +195,7 @@ func NewListIncidentOptsFromDefaults() pagerduty.ListIncidentsOptions {
 }
 
 func HighAcknowledgedIncidents(client PagerDutyClient, users []string) (*pagerduty.ListIncidentsResponse, error) {
-	var ctx = context.Background()
-	highAcknowledgedIncidents, err := client.ListIncidentsWithContext(ctx, pagerduty.ListIncidentsOptions{UserIDs: users, Urgencies: []string{"high"}, Statuses: []string{"acknowledged"}})
+	highAcknowledgedIncidents, err := client.ListIncidentsWithContext(context.TODO(), pagerduty.ListIncidentsOptions{UserIDs: users, Urgencies: []string{"high"}, Statuses: []string{"acknowledged"}})
 
 	if err != nil {
 		fmt.Println(err)
@@ -128,7 +222,6 @@ func HighAcknowledgedIncidents(client PagerDutyClient, users []string) (*pagerdu
 }
 
 func AcknowledgeIncident(client PagerDutyClient, incidents []*pagerduty.Incident, user *pagerduty.User) ([]pagerduty.Incident, error) {
-	var ctx = context.Background()
 	var i []pagerduty.Incident
 
 	opts := []pagerduty.ManageIncidentsOptions{}
@@ -144,7 +237,7 @@ func AcknowledgeIncident(client PagerDutyClient, incidents []*pagerduty.Incident
 	}
 
 	for {
-		response, err := client.ManageIncidentsWithContext(ctx, user.Email, opts)
+		response, err := client.ManageIncidentsWithContext(context.TODO(), user.Email, opts)
 		if err != nil {
 			return i, fmt.Errorf("pd.AcknowledgeIncident(): failed to acknowledge incident(s) `%v`: %v", incidents, err)
 		}
@@ -165,11 +258,10 @@ func AcknowledgeIncident(client PagerDutyClient, incidents []*pagerduty.Incident
 }
 
 func GetAlerts(client PagerDutyClient, id string, opts pagerduty.ListIncidentAlertsOptions) ([]pagerduty.IncidentAlert, error) {
-	var ctx = context.Background()
 	var a []pagerduty.IncidentAlert
 
 	for {
-		response, err := client.ListIncidentAlertsWithContext(ctx, id, opts)
+		response, err := client.ListIncidentAlertsWithContext(context.TODO(), id, opts)
 		if err != nil {
 			return a, fmt.Errorf("pd.GetAlerts(): failed to get alerts for incident `%v`: %v", id, err)
 		}
@@ -187,10 +279,9 @@ func GetAlerts(client PagerDutyClient, id string, opts pagerduty.ListIncidentAle
 }
 
 func GetIncident(client PagerDutyClient, id string) (*pagerduty.Incident, error) {
-	var ctx = context.Background()
 	var i *pagerduty.Incident
 
-	i, err := client.GetIncidentWithContext(ctx, id)
+	i, err := client.GetIncidentWithContext(context.TODO(), id)
 	if err != nil {
 		return i, fmt.Errorf("pd.GetIncident(): failed to get incident `%v`: %v", id, err)
 	}
@@ -199,11 +290,10 @@ func GetIncident(client PagerDutyClient, id string) (*pagerduty.Incident, error)
 }
 
 func GetIncidents(client PagerDutyClient, opts pagerduty.ListIncidentsOptions) ([]pagerduty.Incident, error) {
-	var ctx = context.Background()
 	var i []pagerduty.Incident
 
 	for {
-		response, err := client.ListIncidentsWithContext(ctx, opts)
+		response, err := client.ListIncidentsWithContext(context.TODO(), opts)
 		if err != nil {
 			return i, fmt.Errorf("pd.GetIncidents(): failed to get incidents : %v", err)
 		}
@@ -221,10 +311,9 @@ func GetIncidents(client PagerDutyClient, opts pagerduty.ListIncidentsOptions) (
 }
 
 func GetNotes(client PagerDutyClient, id string) ([]pagerduty.IncidentNote, error) {
-	var ctx = context.Background()
 	var n []pagerduty.IncidentNote
 
-	n, err := client.ListIncidentNotesWithContext(ctx, id)
+	n, err := client.ListIncidentNotesWithContext(context.TODO(), id)
 	if err != nil {
 		return n, fmt.Errorf("pd.GetNotes(): failed to get incident notes `%v`: %v", id, err)
 	}
@@ -232,7 +321,7 @@ func GetNotes(client PagerDutyClient, id string) ([]pagerduty.IncidentNote, erro
 	return n, nil
 }
 
-func GetTeams(client PagerDutyClient, teams []string) ([]*pagerduty.Team, error) {
+func GetTeams(client *pagerduty.Client, teams []string) ([]*pagerduty.Team, error) {
 	var ctx = context.Background()
 	var t []*pagerduty.Team
 
@@ -247,7 +336,7 @@ func GetTeams(client PagerDutyClient, teams []string) ([]*pagerduty.Team, error)
 	return t, nil
 }
 
-func GetTeamMemberIDs(client PagerDutyClient, teams []*pagerduty.Team, opts pagerduty.ListTeamMembersOptions) ([]string, error) {
+func GetTeamMemberIDs(client *pagerduty.Client, teams []*pagerduty.Team, opts pagerduty.ListTeamMembersOptions) ([]string, error) {
 	var ctx = context.Background()
 	var u []string
 
@@ -273,7 +362,7 @@ func GetTeamMemberIDs(client PagerDutyClient, teams []*pagerduty.Team, opts page
 	return u, nil
 }
 
-func GetUser(client PagerDutyClient, id string, opts pagerduty.GetUserOptions) (*pagerduty.User, error) {
+func GetUser(client *pagerduty.Client, id string, opts pagerduty.GetUserOptions) (*pagerduty.User, error) {
 	var ctx = context.Background()
 	var u *pagerduty.User
 
@@ -286,7 +375,6 @@ func GetUser(client PagerDutyClient, id string, opts pagerduty.GetUserOptions) (
 }
 
 func ReassignIncidents(client PagerDutyClient, incidents []*pagerduty.Incident, user *pagerduty.User, users []*pagerduty.User) ([]pagerduty.Incident, error) {
-	var ctx = context.Background()
 	var i []pagerduty.Incident
 
 	a := []pagerduty.Assignee{}
@@ -311,7 +399,7 @@ func ReassignIncidents(client PagerDutyClient, incidents []*pagerduty.Incident, 
 	// a "More" response so we can fix the code
 
 	for {
-		response, err := client.ManageIncidentsWithContext(ctx, user.Email, opts)
+		response, err := client.ManageIncidentsWithContext(context.TODO(), user.Email, opts)
 		if err != nil {
 			return i, err
 		}
@@ -332,7 +420,6 @@ func ReassignIncidents(client PagerDutyClient, incidents []*pagerduty.Incident, 
 }
 
 func PostNote(client PagerDutyClient, id string, user *pagerduty.User, content string) (*pagerduty.IncidentNote, error) {
-	var ctx = context.Background()
 	var n *pagerduty.IncidentNote
 
 	note := pagerduty.IncidentNote{
@@ -340,7 +427,7 @@ func PostNote(client PagerDutyClient, id string, user *pagerduty.User, content s
 		User:    user.APIObject,
 	}
 
-	n, err := client.CreateIncidentNoteWithContext(ctx, id, note)
+	n, err := client.CreateIncidentNoteWithContext(context.TODO(), id, note)
 	if err != nil {
 		return n, err
 	}
